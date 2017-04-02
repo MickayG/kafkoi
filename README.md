@@ -1,3 +1,6 @@
+[![GoDoc](https://godoc.org/github.com/MickayG/kafkoi?status.png)](https://godoc.org/github.com/MickayG/kafkoi)
+
+
 KafKoi
 ======
 
