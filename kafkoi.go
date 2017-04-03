@@ -71,19 +71,19 @@ func NewServiceConfig() ServiceConfig {
 //    (Optional) Size of offset batches, written to Kafka. Larger sizes increases the chance of re-reading data in the event
 //      of failure, however the larger the size, the more efficient offset storage is.
 func ParseArgs() ServiceConfig {
+
 	broker_list := flag.String("broker-list", "", "Comma delimited list of brokers. E.g 'broker1:9092,broker2:9092'")
-	checkFlagSet("broker-list", broker_list)
-	broker_array := strings.Split(*broker_list, ",")
-
 	input_topic := flag.String("input-topic", "", "Name of the input topic")
-	checkFlagSet("input-topic", input_topic)
-
 	output_topic := flag.String("output-topic", "", "Name of the output topic")
-	checkFlagSet("output-topic", output_topic)
-
 	consumer_group := flag.String("consumer-group", createUUID(), "Optional name of the consumer-group. If not set then a UUID will be generated")
-
 	offset_batch_size := flag.Int("offset-batch-size", 1000, "Optional size off consumer offsets to batch write. If not set, defaults to 1000")
+
+	flag.Parse()
+
+	checkFlagSet("broker-list", broker_list)
+	checkFlagSet("input-topic", input_topic)
+	checkFlagSet("output-topic", output_topic)
+	broker_array := strings.Split(*broker_list, ",")
 
 	var config ServiceConfig
 	config.BrokerArray = broker_array
