@@ -11,18 +11,34 @@ import (
 	// Adds clustering abilities such as offset tracking
 	cluster "github.com/bsm/sarama-cluster"
 
-	"log"
+	log "github.com/Sirupsen/logrus"
 	"os/signal"
 	"encoding/hex"
 )
 
+type PartitionerType int
+const (
+	// From Sarama (kafka library) docs:
+	// If the message's key is nil then a random partition is chosen. Otherwise the FNV-1a hash of the encoded bytes of the message key is used, modulus the number of partitions. This ensures that messages with the same key always end up on the same partition.
+	HashPartitioner PartitionerType = iota
+
+	// From Sarama (kafka library) docs:
+	// Randomly chooses a random partition each time
+	RandomPartitioner PartitionerType = iota
+
+	//From Sarama (kafka library) docs:
+	// Walk through the available partitions one at a time
+	RoundRobinPartitioner PartitionerType = iota
+)
+
 // The configuration for the Kafka input and output
 type ServiceConfig struct {
-	BrokerArray []string
-	InputTopic string
-	OutputTopic string
-	ConsumerGroup string
+	BrokerArray     []string
+	InputTopic      string
+	OutputTopic     string
+	ConsumerGroup   string
 	BatchOffsetSize int
+	Partitioner     PartitionerType
 }
 
 // Represents a Kafka message to be read or sent
@@ -36,6 +52,15 @@ type Message struct {
 // Returns the message and a boolean which indicates whether the message should be written or not.
 // Ie. if bool = true, message will be written, if false, it will not be written to the output topic
 type Transform func(Message) (Message, bool)
+
+// Returns a new ServiceConfig with default values set
+func NewServiceConfig() ServiceConfig {
+	var config ServiceConfig
+	config.ConsumerGroup = createUUID()
+	config.BatchOffsetSize = 1000
+	config.Partitioner = RoundRobinPartitioner
+	return config
+}
 
 // Parse command line arguements, returning a ServiceConfig for the run method.
 // Arguments:
@@ -90,14 +115,18 @@ func Run(transform Transform, config ServiceConfig){
 // Run the transform with the instantiated consumer and producer
 func RunTransform(transform Transform, consumer *cluster.Consumer, producer *sarama.AsyncProducer, outputTopic string, batchOffsetSize int, signals chan os.Signal) {
 	// This will be used to store any offsets
-	var offsets cluster.OffsetStash
+	offsets := cluster.NewOffsetStash()
 
 	messages := consumer.Messages()
 	for {
 		select {
 		case msg, more := <- messages:
 			if more {
-				log.Printf("Recv: Key - %s, Value - %s", hex.EncodeToString(msg.Key), hex.EncodeToString(msg.Value))
+				// We don't want to encode the key & value unless we're actually going to log something
+				if log.GetLevel() <= log.DebugLevel {
+					log.WithFields(log.Fields{"key": hex.EncodeToString(msg.Key), "value": hex.EncodeToString(msg.Value)}).Debug("Recv")
+				}
+
 				var message Message
 				message.Key = msg.Key
 				message.Value = msg.Value
@@ -109,37 +138,41 @@ func RunTransform(transform Transform, consumer *cluster.Consumer, producer *sar
 						Key:   sarama.ByteEncoder(output.Key),
 						Value: sarama.ByteEncoder(output.Value)}
 
-					// Mark the message as being consumed once we've queued it to the output topic
-					// TODO Can do at least once?
+					if log.GetLevel() <= log.DebugLevel {
+						log.WithFields(log.Fields{"key": hex.EncodeToString(output.Key), "value": hex.EncodeToString(output.Value)}).Debug("Send")
+					}
 				}
 
+				// TODO Can do at least once? Is this guarenteed with the close signal.. probably not
 				offsets.MarkOffset(msg, "")
 
 				offsetsSize := len(offsets.Offsets())
 				if offsetsSize > batchOffsetSize {
 					// When we reach the desired offset size, launch a thread to write the offsets
-					go func() {
-						log.Printf("Storing %d offsets", offsetsSize)
-						consumer.MarkOffsets(&offsets)
-					}()
+					go StoreOffsets(offsets, consumer)
 				}
 			}
 		case err, more := <-consumer.Errors():
 			if more {
-				log.Printf("Error: %s\n", err.Error())
+				log.Error("Error: %s\n", err.Error())
 			}
 		case ntf, more := <-consumer.Notifications():
 			if more {
-				log.Printf("Notification: %+v\n", ntf)
+				log.Info("Notification: %+v\n", ntf)
 			}
 		case <-signals:
 			// Ensure we store all the offsets on application close
 			if len(offsets.Offsets()) > 0{
-				consumer.MarkOffsets(&offsets)
+				StoreOffsets(offsets, consumer)
 			}
 			return
 		}
 	}
+}
+func StoreOffsets(offsets *cluster.OffsetStash, consumer *cluster.Consumer) {
+		offsetsSize := len(offsets.Offsets())
+		consumer.MarkOffsets(offsets)
+		log.WithField("offsetSize", offsetsSize).Debug("Stored offsets")
 }
 
 
@@ -156,6 +189,11 @@ func create_consumer(config ServiceConfig) *cluster.Consumer {
 		panic(err)
 	}
 
+	log.WithFields(log.Fields{
+		"brokers": config.BrokerArray,
+		"consumer-group": config.ConsumerGroup,
+		"input-topic": config.InputTopic}).Info("Created consumer")
+
 	return consumer
 }
 
@@ -165,10 +203,28 @@ func create_producer(config ServiceConfig) *sarama.AsyncProducer {
 	producerConfig := sarama.NewConfig()
 	producerConfig.Producer.Return.Successes = false
 
+	switch config.Partitioner {
+	case RandomPartitioner:
+		producerConfig.Producer.Partitioner = sarama.NewRandomPartitioner
+		log.WithField("Partitioner", "random").Info("Set producer partitioner")
+	case RoundRobinPartitioner:
+		producerConfig.Producer.Partitioner = sarama.NewRoundRobinPartitioner
+		log.WithField("Partitioner", "roundrobin").Info("Set producer partitioner")
+	case HashPartitioner:
+		producerConfig.Producer.Partitioner = sarama.NewHashPartitioner
+		log.WithField("Partitioner", "hash").Info("Set producer partitioner")
+	default:
+		log.WithField("Partitioner", config.Partitioner).Error("Unknown partitioner type")
+	}
+
 	producer, err := sarama.NewAsyncProducer(config.BrokerArray, producerConfig)
 	if err != nil {
-		panic(err)
+		log.Panic(err)
 	}
+
+	log.WithFields(log.Fields{
+		"brokers": config.BrokerArray,
+	}).Info("Created producer")
 
 	return &producer
 }
