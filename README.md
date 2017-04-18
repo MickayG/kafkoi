@@ -4,7 +4,7 @@
 KafKoi
 ======
 
-A very simple, **work-in-progress**, lightweight *microservice* framework that communicates via Kafka.
+A very simple, **work-in-progress**, lightweight ETL framework which reads to and from Kafka.
 
 ### Using this library
 
